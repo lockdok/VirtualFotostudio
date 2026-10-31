@@ -1,0 +1,42 @@
+# Sensitive personal reference photos & face uploads
+Reference/
+reference/
+*.zip
+
+# Generated photoshoots & outputs
+OUTPUT/
+output/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Environment variables & secrets
+.env
+.env.*
+*.key
+*.token
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Large AI model files & weights
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+*.onnx
+
+# OS & Editor temp files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
+
