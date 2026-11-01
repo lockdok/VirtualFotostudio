@@ -16,6 +16,7 @@ if /I "%MODE%"=="balanced" set "RESERVE_VRAM=3.0"
 if /I "%MODE%"=="turbo" set "RESERVE_VRAM=0.5"
 if /I not "%MODE%"=="quiet" if /I not "%MODE%"=="balanced" if /I not "%MODE%"=="turbo" (
     echo [ERROR] Unknown mode "%MODE%". Choose quiet, balanced, or turbo.
+    pause
     exit /b 2
 )
 
@@ -31,16 +32,17 @@ call :comfy_up
 if errorlevel 1 (
     if not exist "%COMFY_MAIN%" (
         echo [ERROR] ComfyUI entry point not found: %COMFY_MAIN%
+        pause
         exit /b 1
     )
     "%VENV_PYTHON%" "%~dp0scripts\manage_services.py" start comfy ^
-        --pid-dir "%SERVICE_DIR%" --log-dir "%LOG_DIR%" --cwd "%COMFY_BASE%" ^
-        --match "%COMFY_MAIN%" --match "--port 8188" -- ^
-        "%VENV_PYTHON%" "%COMFY_MAIN%" ^
-        --base-directory "%COMFY_BASE%" --listen 127.0.0.1 --port 8188 ^
+        --pid-dir "%SERVICE_DIR%" --log-dir "%LOG_DIR%" --cwd "%COMFY_BASE_DIR%" ^
+        --match "%COMFY_MAIN%" --match "port" --match "8188" -- "%VENV_PYTHON%" "%COMFY_MAIN%" ^
+        --base-directory "%COMFY_BASE_DIR%" --listen 127.0.0.1 --port 8188 ^
         --disable-auto-launch --cuda-malloc --dont-print-server --reserve-vram %RESERVE_VRAM%
     if errorlevel 1 (
         echo [ERROR] Could not start ComfyUI. Check %LOG_DIR%\comfy.log
+        pause
         exit /b 1
     )
     echo         Waiting for ComfyUI to initialise ^(up to 2 minutes^)...
@@ -48,6 +50,7 @@ if errorlevel 1 (
     call :wait_for_comfy
     if errorlevel 1 (
         echo [ERROR] ComfyUI did not respond. Check %LOG_DIR%\comfy.log
+        pause
         exit /b 1
     )
 ) else (
@@ -60,6 +63,7 @@ if errorlevel 1 (
     "%VENV_PYTHON%" -m pip install -r "%~dp0requirements.txt" --quiet
     if errorlevel 1 (
         echo [ERROR] Dependency installation failed.
+        pause
         exit /b 1
     )
 )
@@ -68,13 +72,13 @@ echo [3/3] Starting Virtual AI Photostudio...
 call :photostudio_up
 if errorlevel 1 (
     "%VENV_PYTHON%" "%~dp0scripts\manage_services.py" start photostudio ^
-        --pid-dir "%SERVICE_DIR%" --log-dir "%LOG_DIR%" --cwd "%~dp0" ^
-        --match "%~dp0photostudio_app.py" --match "--server.port 7860" -- ^
-        "%VENV_PYTHON%" -m streamlit run "%~dp0photostudio_app.py" ^
+        --pid-dir "%SERVICE_DIR%" --log-dir "%LOG_DIR%" --cwd "%~dp0." ^
+        --match "%~dp0photostudio_app.py" --match "server.port" --match "7860" -- "%VENV_PYTHON%" -m streamlit run "%~dp0photostudio_app.py" ^
         --server.port 7860 --server.address 127.0.0.1 --server.headless true ^
         --browser.gatherUsageStats false --theme.base dark
     if errorlevel 1 (
         echo [ERROR] Could not start the UI. Check %LOG_DIR%\photostudio.log
+        pause
         exit /b 1
     )
 ) else (
@@ -85,6 +89,7 @@ set "TRIES=0"
 call :wait_for_photostudio
 if errorlevel 1 (
     echo [ERROR] The web UI did not start. Check %LOG_DIR%\photostudio.log
+    pause
     exit /b 1
 )
 start http://127.0.0.1:7860

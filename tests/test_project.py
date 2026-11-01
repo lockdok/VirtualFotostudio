@@ -20,6 +20,7 @@ class WorkflowTests(unittest.TestCase):
             body_reference_image="body.png", seed=42, hires_scale=1.5,
         )
         self.assertEqual(workflow["14"]["inputs"]["image"], "body.png")
+        self.assertEqual(workflow["15"]["inputs"]["preset"], "PLUS FACE (portraits)")
         self.assertEqual(workflow["16"]["inputs"]["image"], ["14", 0])
         self.assertEqual(workflow["3"]["inputs"]["model"], ["16", 0])
         self.assertEqual(workflow["11"]["inputs"]["samples"], ["8", 0])
@@ -204,6 +205,27 @@ class DownloaderTests(unittest.TestCase):
 
 
 class ServiceManagerTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows service launch flags are platform-specific.")
+    def test_started_services_do_not_create_console_windows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            process = types.SimpleNamespace(pid=1234, poll=lambda: None)
+            snapshot = {"creation_time": 123}
+            with patch.object(manage_services.subprocess, "Popen", return_value=process) as popen, \
+                 patch.object(manage_services, "_process_snapshot", return_value=snapshot), \
+                 patch.object(manage_services.time, "sleep"):
+                manage_services.start_service(
+                    "photostudio", root / "services", root / "logs", root,
+                    ["photostudio_app.py"], [sys.executable, "photostudio_app.py"],
+                )
+
+        self.assertEqual(
+            popen.call_args.kwargs["creationflags"],
+            manage_services.subprocess.CREATE_NO_WINDOW
+            | manage_services.subprocess.CREATE_NEW_PROCESS_GROUP
+            | manage_services.subprocess.BELOW_NORMAL_PRIORITY_CLASS,
+        )
+
     def test_process_record_requires_same_executable_creation_and_command(self):
         record = {
             "executable": sys.executable,
@@ -222,6 +244,30 @@ class ServiceManagerTests(unittest.TestCase):
     def test_untracked_service_is_left_untouched(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manage_services.stop_service("photostudio", Path(temp_dir))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process management is platform-specific.")
+    def test_stop_service_terminates_only_the_recorded_process_tree(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pid_dir = Path(temp_dir)
+            record = {
+                "pid": 1234,
+                "executable": sys.executable,
+                "creation_time": 123,
+                "match": ["photostudio_app.py"],
+            }
+            manage_services._record_path(pid_dir, "photostudio").write_text(json.dumps(record))
+            snapshot = {
+                "executable": sys.executable,
+                "creation_time": 123,
+                "command_line": f'"{sys.executable}" photostudio_app.py',
+            }
+            with patch.object(manage_services, "_process_snapshot", return_value=snapshot), \
+                 patch.object(manage_services.subprocess, "run") as run:
+                manage_services.stop_service("photostudio", pid_dir)
+
+            self.assertIn("VFS_PROCESS_ID", run.call_args.kwargs["env"])
+            self.assertIn("Stop-Process -Id $root.ProcessId", run.call_args.args[0][-1])
+            self.assertFalse(manage_services._record_path(pid_dir, "photostudio").exists())
 
     def test_start_command_arguments_are_parsed_before_the_separator(self):
         arguments = [

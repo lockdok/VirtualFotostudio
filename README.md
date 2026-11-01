@@ -6,6 +6,7 @@ Local ComfyUI photobooth with session-based likeness preservation. Reference pho
 
 - Upload/select a local primary face reference.
 - Generate a fast 3x3 prompt-quality preview in 3:4 or 4:3.
+- Click any preview thumbnail to open the full-size image in a new browser tab.
 - Run a user-selected number of high-resolution individual images. Full photos render at SDXL's native size (896×1152 or 1152×896) and, with *Detail pass* on (default), are enlarged 1.5× and refined by a second sampler pass to 1344×1728 / 1728×1344.
 - Run selected concepts as a batch.
 - Re-roll any single preview image (new seed and a new pose) without redoing the other eight.
@@ -24,7 +25,9 @@ $env:COMFY_BASE_DIR = "$env:USERPROFILE\Documents\ComfyUI"
 & "$env:COMFY_BASE_DIR\.venv\Scripts\python.exe" -m pip install insightface onnxruntime-gpu
 ```
 
-3. Download the model files with the helper script (uses the same Python environment):
+3. **One-click option:** double-click `download_models.bat` in the project folder. It uses ComfyUI's Python environment, installs the downloader dependency if needed, and downloads the default checkpoint plus all required identity models. The default set needs about 12.3 GB of free disk space. You can also pass downloader options from Command Prompt, for example `download_models.bat --what identity`.
+
+   Or download the model files directly with the helper script:
 
 ```powershell
 & "$env:COMFY_BASE_DIR\.venv\Scripts\python.exe" scripts\download_models.py
@@ -60,12 +63,16 @@ start_photostudio.bat balanced
 start_photostudio.bat turbo
 ```
 
-Quiet reserves 6 GB for other applications; Balanced reserves 3 GB; Turbo reserves 0.5 GB. The launcher tracks services it starts under `%LOCALAPPDATA%\VirtualFotostudio`, runs them below normal CPU priority, and logs them under `%LOCALAPPDATA%\VirtualFotostudio\logs`. The web UI listens on `127.0.0.1` only, so it is not reachable from other devices on your network. The launcher waits for ComfyUI to answer (up to 2 minutes) before opening the browser. Use `stop_photostudio.bat` to stop only services started by this launcher; unrelated processes on ports 7860 or 8188 are left untouched.
+Quiet reserves 6 GB for other applications; Balanced reserves 3 GB; Turbo reserves 0.5 GB. The launcher tracks services it starts under `%LOCALAPPDATA%\VirtualFotostudio`, runs them below normal CPU priority without opening extra console windows, and logs them under `%LOCALAPPDATA%\VirtualFotostudio\logs`. The web UI listens on `127.0.0.1` only, so it is not reachable from other devices on your network. The launcher waits for ComfyUI to answer (up to 2 minutes) before opening the browser.
+
+Use **Stop Photostudio** in the web UI to stop only the Photostudio server while leaving ComfyUI running. Use `stop_photostudio.bat` to stop both services started by this launcher. Unrelated processes on ports 7860 or 8188 are left untouched.
 
 ## Notes
 
 - The detail pass makes each full photo take noticeably longer and needs more VRAM than a single pass. Use Balanced or Turbo mode for it; untick *Detail pass* for faster 896×1152 images.
 - The preview is deliberately a grid of independent images, not an inaccurately labelled fixed-size collage.
+- Click a preview image to open its full-size PNG in a new browser tab.
+- `Reference/` and `OUTPUT/` are local, Git-ignored data folders created as needed. They contain private reference photos and generated results; deleting them removes that local data.
 - `Release ComfyUI VRAM now` calls ComfyUI's `/free` endpoint. It requests model unloading; Windows or other GPU applications can still retain their own VRAM.
 - If a workflow fails (for example a missing model or no face found in the reference), the app now shows ComfyUI's own error message immediately instead of waiting for a timeout.
 - Reference photos with non-Latin names (for example Cyrillic) are kept as-is; two different photos with the same name are both kept.

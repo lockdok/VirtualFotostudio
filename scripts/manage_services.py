@@ -76,7 +76,7 @@ def start_service(service: str, pid_dir: Path, log_dir: Path, cwd: Path,
     executable = os.path.abspath(argv[0])
     log_path = log_dir / f"{service}.log"
     creation_flags = (
-        subprocess.DETACHED_PROCESS
+        subprocess.CREATE_NO_WINDOW
         | subprocess.CREATE_NEW_PROCESS_GROUP
         | subprocess.BELOW_NORMAL_PRIORITY_CLASS
     )
@@ -130,21 +130,43 @@ def stop_service(service: str, pid_dir: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("The service launcher is Windows-only.")
 
-    command = (
-        "$process = Get-CimInstance -ClassName Win32_Process "
-        "-Filter ('ProcessId = ' + $env:VFS_PROCESS_ID); "
-        "if (-not $process) { throw 'Process is no longer running.' }; "
-        "$markers = ConvertFrom-Json $env:VFS_MATCH_MARKERS; "
-        "$allMarkersPresent = $true; "
-        "foreach ($marker in $markers) { "
-        "if ($process.CommandLine.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase) -lt 0) "
-        "{ $allMarkersPresent = $false } }; "
-        "if ($process.ExecutablePath -ine $env:VFS_EXPECTED_EXECUTABLE -or "
-        "[Int64]$process.CreationDate.ToFileTimeUtc() -ne [Int64]$env:VFS_PROCESS_CREATED "
-        "-or -not $allMarkersPresent) { "
-        "throw 'Process identity changed; refusing to stop it.' }; "
-        "Stop-Process -Id $process.ProcessId -Force"
-    )
+    command = """
+$processes = @(Get-CimInstance -ClassName Win32_Process)
+$root = $processes | Where-Object { $_.ProcessId -eq [int]$env:VFS_PROCESS_ID }
+if (-not $root) { throw 'Process is no longer running.' }
+$markers = ConvertFrom-Json $env:VFS_MATCH_MARKERS
+$allMarkersPresent = $true
+foreach ($marker in $markers) {
+    if ($root.CommandLine.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        $allMarkersPresent = $false
+    }
+}
+if ($root.ExecutablePath -ine $env:VFS_EXPECTED_EXECUTABLE -or
+    [Int64]$root.CreationDate.ToFileTimeUtc() -ne [Int64]$env:VFS_PROCESS_CREATED -or
+    -not $allMarkersPresent) {
+    throw 'Process identity changed; refusing to stop it.'
+}
+$descendants = [System.Collections.Generic.List[object]]::new()
+$frontier = @([int]$root.ProcessId)
+$depth = 1
+while ($frontier.Count -gt 0) {
+    $next = @()
+    foreach ($parentId in $frontier) {
+        foreach ($child in $processes | Where-Object { $_.ParentProcessId -eq $parentId }) {
+            if ($child.ProcessId -ne $PID) {
+                $descendants.Add([pscustomobject]@{ Process = $child; Depth = $depth })
+            }
+            $next += [int]$child.ProcessId
+        }
+    }
+    $frontier = $next
+    $depth += 1
+}
+foreach ($item in $descendants | Sort-Object -Property Depth -Descending) {
+    Stop-Process -Id $item.Process.ProcessId -Force -ErrorAction SilentlyContinue
+}
+Stop-Process -Id $root.ProcessId -Force
+"""
     environment = os.environ.copy()
     environment["VFS_PROCESS_ID"] = str(record["pid"])
     environment["VFS_EXPECTED_EXECUTABLE"] = record["executable"]

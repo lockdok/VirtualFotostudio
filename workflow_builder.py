@@ -137,7 +137,7 @@ def build_faceid_workflow(
         },
         "15": {
             "class_type": "IPAdapterUnifiedLoader",
-            "inputs": {"model": ["1", 0], "preset": "PLUS FACE"},
+            "inputs": {"model": ["1", 0], "preset": "PLUS FACE (portraits)"},
         },
         "16": {
             "class_type": "IPAdapterAdvanced",

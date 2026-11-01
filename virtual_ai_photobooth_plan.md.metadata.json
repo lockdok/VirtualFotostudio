@@ -1,6 +1,0 @@
-{
-  "summary":  "Updated plan with RAM & VRAM Resource Controller: includes a 'Quiet Background Mode' / custom VRAM cap slider (e.g. 50-60% VRAM limit via torch.cuda.set_per_process_memory_fraction and ComfyUI --reserve-vram), Below-Normal CPU process priority, and auto-unload on idle so your computer stays fast and responsive while working in parallel.",
-  "updatedAt":  "2026-10-31T18:48:58.627646300Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

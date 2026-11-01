@@ -24,11 +24,12 @@ flowchart LR
 | `scripts/download_models.py` | Downloads and size-validates the checkpoint, FaceID files, Plus Face adapter and CLIP Vision model. |
 | `scripts/manage_services.py` | Tracks the ComfyUI and Streamlit processes started by the launcher so stop never kills an unrelated listener. |
 | `start_photostudio.bat` / `stop_photostudio.bat` | Start or stop ComfyUI and the web UI. |
-| `Reference/`, `OUTPUT/` | Your reference photos and everything generated (both git-ignored). |
+| `download_models.bat` | One-click download of the workflow checkpoint and identity models. |
+| `Reference/`, `OUTPUT/` | Local-only reference photos and generated results (created as needed and git-ignored). |
 
 ## Start and stop
 
-`start_photostudio.bat [quiet|balanced|turbo]` starts ComfyUI if needed, waits until it answers, then opens `http://127.0.0.1:7860`. The page is reachable from this PC only. `stop_photostudio.bat` stops only processes started by this launcher; already-running external services are left alone.
+`start_photostudio.bat [quiet|balanced|turbo]` starts ComfyUI if needed, waits until it answers, then opens `http://127.0.0.1:7860`. The page is reachable from this PC only. The **Stop Photostudio** button on the page stops the tracked Streamlit server and leaves ComfyUI running. `stop_photostudio.bat` stops both services started by this launcher; already-running external services are left alone. Service logs and process records are kept under `%LOCALAPPDATA%\VirtualFotostudio`.
 
 ## Using the page
 
@@ -37,11 +38,14 @@ flowchart LR
 3. **Quality and likeness** - *Identity strength* trades likeness against prompt freedom. *Performance mode* sets steps and preview size. Pick an SDXL checkpoint.
 4. **Generate**
    - **3x3 prompt preview** - nine independent images, a quick way to judge a concept.
+     Click a thumbnail to open the full-size PNG in a new browser tab.
    - **Full Photoshoot** - the number of high-resolution images you choose. Each is rendered at SDXL's native size (896x1152 or 1152x896); with *Detail pass* ticked it is then enlarged 1.5x and refined by a second pass, giving 1344x1728 (or 1728x1344). This avoids the warped details that rendering very large in one pass causes, at the cost of time and VRAM.
    - **Batch Concepts** - the full shoot for every ticked concept.
    - **Re-roll** (below each preview image) - replaces just that image with a new seed *and* a new pose, keeping the same reference, concept and settings as the preview. It reloads models each time unless you untick *Auto-release ComfyUI VRAM*, so untick it for quick consecutive re-rolls.
 
 Leave the page alone while a job runs: changing a setting restarts the script and interrupts the job.
+
+Use **Stop Photostudio** when finished if you want to close only the browser UI server. ComfyUI remains available for other workflows; use `stop_photostudio.bat` to stop both launcher-owned services.
 
 ## What is saved
 

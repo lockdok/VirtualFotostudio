@@ -7,8 +7,13 @@ All generation logic lives in ``shoot_runner.py``; this file draws the UI.
 
 from __future__ import annotations
 
+import base64
+import html
 import hashlib
+import logging
+import os
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -17,12 +22,14 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 import comfy_bridge
 from pose_director import CONCEPT_TEMPLATES, PoseConfig, get_available_vibes
+from scripts import manage_services
 from shoot_runner import ASPECTS, HIRES_SCALE, SDXL_NATIVE, reroll_tile, run_series, slug
 from workflow_builder import upscaled_size
 
 WORKSPACE = Path(__file__).parent
 OUTPUT_DIR = WORKSPACE / "OUTPUT"
 REFERENCE_DIR = WORKSPACE / "Reference"
+SERVICE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "VirtualFotostudio" / "services"
 OUTPUT_DIR.mkdir(exist_ok=True)
 REFERENCE_DIR.mkdir(exist_ok=True)
 
@@ -83,6 +90,26 @@ def upload_reference(reference: Path) -> str:
     upload_name = f"ref_{digest}{reference.suffix.lower() or '.jpg'}"
     result = comfy_bridge.upload_image(str(reference), subfolder="photostudio", upload_name=upload_name)
     return f"{result.get('subfolder', '') + '/' if result.get('subfolder') else ''}{result['name']}"
+
+
+def show_clickable_preview(slot, data: bytes, caption: str) -> None:
+    image = base64.b64encode(data).decode("ascii")
+    safe_caption = html.escape(caption, quote=True)
+    slot.markdown(
+        f'<a href="data:image/png;base64,{image}" target="_blank" rel="noopener noreferrer" '
+        f'aria-label="Open {safe_caption} at full size">'
+        f'<img src="data:image/png;base64,{image}" alt="{safe_caption}" '
+        'style="display:block;width:100%;height:auto;border-radius:8px"></a>'
+        f'<div style="text-align:center;margin-top:4px">{safe_caption}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def stop_photostudio() -> None:
+    try:
+        manage_services.stop_service("photostudio", SERVICE_DIR)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not stop the Photostudio service")
 
 
 st.set_page_config(page_title="Virtual AI Photostudio", page_icon="📸", layout="wide")
@@ -156,6 +183,13 @@ with left:
     full_clicked = st.button("📷 Run Full Photoshoot", disabled=not ready, use_container_width=True)
     batch_clicked = st.button("🗂 Run selected Batch Concepts", disabled=not ready or not batch_concepts, use_container_width=True)
     unload_clicked = st.button("Release ComfyUI VRAM now", disabled=not comfy_ok, use_container_width=True)
+    stop_clicked = st.button(
+        "⏹ Stop Photostudio",
+        disabled=not (SERVICE_DIR / "photostudio.json").is_file(),
+        use_container_width=True,
+        help="Stops this Photostudio server only. ComfyUI will keep running.",
+    )
+    st.caption("Stop Photostudio here without closing ComfyUI.")
     st.caption("Leave the page alone while a job runs: changing a setting restarts the script and interrupts it.")
     auto_unload = st.checkbox("Auto-release ComfyUI VRAM after each job", value=True,
                               help="Frees GPU memory after every job. Turn it off for faster consecutive re-rolls.")
@@ -179,7 +213,7 @@ with right:
             if st.session_state.tiles[index]:
                 entry = record.images.get(index) if record else None
                 caption = f"Preview {index + 1}" + (f" · seed {entry['seed']}" if entry else "")
-                slot.image(st.session_state.tiles[index], caption=caption, use_container_width=True)
+                show_clickable_preview(slot, st.session_state.tiles[index], caption)
                 if st.button("🔄 Re-roll", key=f"reroll_{index}", disabled=not (ready and record), use_container_width=True,
                              help="New seed and a new pose for this image only."):
                     reroll_index = index
@@ -188,6 +222,10 @@ with right:
 
 if unload_clicked:
     st.success("ComfyUI confirmed the model-unload request.") if comfy_bridge.unload_models() else st.warning("ComfyUI did not confirm unloading. Check its server log.")
+
+if stop_clicked:
+    st.success("Photostudio is shutting down. ComfyUI will remain running.")
+    threading.Timer(1.5, stop_photostudio).start()
 
 
 def start_job() -> None:
@@ -211,7 +249,7 @@ def run_job(concepts: list[str], count: int, preview: bool) -> None:
             st.session_state.last_output = data
             if preview:
                 st.session_state.tiles[index] = data
-                tile_slots[index].image(data, caption=f"Preview {index + 1} · seed {entry['seed']}", use_container_width=True)
+                show_clickable_preview(tile_slots[index], data, f"Preview {index + 1} · seed {entry['seed']}")
 
         def on_error(message: str) -> None:
             generation_status.error(message)
