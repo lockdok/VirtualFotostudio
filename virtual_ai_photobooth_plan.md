@@ -1,3 +1,5 @@
+> **Historical design plan.** The original 3072x3072 collage was replaced by independent images; see the implementation update at the end and `README.md` / `photostudio_walkthrough.md` for current behaviour.
+
 # Implementation Plan: Local Web AI Photobooth (with Resource Controller)
 
 A single-page local web application (`http://localhost:7860`) with **semicontrollable 3x3 pose generation**, 1-click **Start/Stop** scripts, and a dedicated **RAM & VRAM Resource Controller** for smooth background multitasking.

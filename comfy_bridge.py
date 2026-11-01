@@ -11,7 +11,6 @@ import uuid
 import urllib.request
 import urllib.parse
 import mimetypes
-import websocket
 import threading
 from pathlib import Path
 from typing import Optional, Callable
@@ -26,8 +25,8 @@ COMFY_WS_URL = f"ws://{COMFY_HOST}:{COMFY_PORT}/ws"
 def is_comfy_running() -> bool:
     """Check if ComfyUI is up and accepting connections."""
     try:
-        req = urllib.request.urlopen(f"{COMFY_BASE_URL}/system_stats", timeout=3)
-        return req.status == 200
+        with urllib.request.urlopen(f"{COMFY_BASE_URL}/system_stats", timeout=3) as response:
+            return response.status == 200
     except Exception:
         return False
 
@@ -57,14 +56,13 @@ def get_available_checkpoints() -> list[str]:
         return []
 
 
-def upload_image(image_path: str, subfolder: str = "") -> dict:
-    """Upload a reference image to ComfyUI's input folder."""
-    import urllib.request
-    from io import BytesIO
+def upload_image(image_path: str, subfolder: str = "", upload_name: Optional[str] = None) -> dict:
+    """Upload a reference image to ComfyUI's input folder.
 
-    url = f"{COMFY_BASE_URL}/upload/image"
-    filename = os.path.basename(image_path)
-
+    ``upload_name`` lets the caller send an ASCII-safe filename even when the
+    local file has a non-Latin name.
+    """
+    filename = upload_name or os.path.basename(image_path)
     with open(image_path, "rb") as f:
         image_data = f.read()
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -88,7 +86,12 @@ def _upload_image_bytes(image_data: bytes, filename: str, content_type: str, sub
     ).encode() + image_data + (
         f"\r\n--{boundary}\r\n"
         f'Content-Disposition: form-data; name="overwrite"\r\n\r\ntrue'
-        f"\r\n--{boundary}--\r\n"
+        + (
+            f"\r\n--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="subfolder"\r\n\r\n{subfolder}'
+            if subfolder else ""
+        )
+        + f"\r\n--{boundary}--\r\n"
     ).encode()
 
     req = urllib.request.Request(
@@ -117,15 +120,66 @@ def unload_models() -> bool:
         return False
 
 
+FACEID_ADAPTER_FILE = "ip-adapter-faceid-plusv2_sdxl.bin"
+FACEID_LORA_FILE = "ip-adapter-faceid-plusv2_sdxl_lora.safetensors"
+PLUS_FACE_ADAPTER_FILE = "ip-adapter-plus-face_sdxl_vit-h.safetensors"
+CLIP_VISION_HINT = "vit-h-14-laion2b"  # matched case-insensitively against clip_vision filenames
+REQUIRED_IDENTITY_NODES = {
+    "IPAdapterModelLoader",
+    "IPAdapterUnifiedLoader",
+    "IPAdapterAdvanced",
+    "IPAdapterUnifiedLoaderFaceID",
+    "IPAdapterFaceID",
+    "LoraLoader",
+    "CLIPVisionLoader",
+}
+
+
+def _node_choices(nodes: dict, node: str, field: str) -> Optional[list[str]]:
+    """Return the file choices ComfyUI lists for a loader input, or None if unknown."""
+    try:
+        choices = nodes[node]["input"]["required"][field][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return choices if isinstance(choices, list) else None
+
+
+def _has_file(choices: Optional[list[str]], wanted: str) -> bool:
+    """True if ``wanted`` is listed (also inside subfolders). Unknown lists never block."""
+    if choices is None:
+        return True
+    wanted = wanted.lower()
+    return any(Path(c.replace("\\", "/")).name.lower() == wanted for c in choices)
+
+
 def get_missing_identity_requirements() -> list[str]:
-    """Return identity workflow nodes absent from the currently running server."""
+    """Return identity-workflow nodes and model files the running server lacks.
+
+    Checks the FaceID custom nodes first; if they are present it also verifies
+    the adapter, LoRA and CLIP Vision files so the UI reports a missing download
+    up front instead of failing partway through a job.
+    """
     try:
         with urllib.request.urlopen(f"{COMFY_BASE_URL}/object_info", timeout=10) as r:
             nodes = json.loads(r.read())
     except Exception:
         return ["ComfyUI is offline"]
-    required = {"IPAdapterUnifiedLoaderFaceID", "IPAdapterFaceID"}
-    return sorted(required.difference(nodes))
+
+    missing = sorted(REQUIRED_IDENTITY_NODES.difference(nodes))
+    if missing:
+        return missing
+
+    adapter_choices = _node_choices(nodes, "IPAdapterModelLoader", "ipadapter_file")
+    if not _has_file(adapter_choices, FACEID_ADAPTER_FILE):
+        missing.append(f"model file {FACEID_ADAPTER_FILE} (models/ipadapter)")
+    if not _has_file(adapter_choices, PLUS_FACE_ADAPTER_FILE):
+        missing.append(f"model file {PLUS_FACE_ADAPTER_FILE} (models/ipadapter)")
+    if not _has_file(_node_choices(nodes, "LoraLoader", "lora_name"), FACEID_LORA_FILE):
+        missing.append(f"model file {FACEID_LORA_FILE} (models/loras)")
+    clip_choices = _node_choices(nodes, "CLIPVisionLoader", "clip_name")
+    if clip_choices is not None and not any(CLIP_VISION_HINT in c.lower() for c in clip_choices):
+        missing.append("CLIP Vision ViT-H model (models/clip_vision)")
+    return missing
 
 
 def queue_prompt(workflow: dict, client_id: str) -> str:
@@ -158,72 +212,83 @@ def get_image(filename: str, subfolder: str, folder_type: str) -> bytes:
         return r.read()
 
 
+def _extract_error(status: dict) -> str:
+    """Pull a readable message out of a failed ComfyUI history ``status`` block."""
+    for kind, payload in status.get("messages", []):
+        if kind == "execution_error":
+            node = payload.get("node_type") or payload.get("node_id") or "unknown node"
+            return f"{node}: {payload.get('exception_message', 'execution error').strip()}"
+    return "ComfyUI reported an execution error (see its console for details)."
+
+
+def _start_progress_listener(client_id: str, prompt_id: str, progress_callback):
+    """Best-effort websocket listener used only for progress bars.
+
+    Completion is never decided here, so a missed or late connection can no
+    longer hang a job; at worst the progress bar stays still.
+    """
+    if progress_callback is None:
+        return None
+    try:
+        import websocket  # websocket-client
+    except ImportError:
+        return None
+
+    def on_message(ws, message):
+        if isinstance(message, bytes):
+            return
+        try:
+            data = json.loads(message)
+        except ValueError:
+            return
+        if data.get("type") != "progress":
+            return
+        payload = data.get("data", {})
+        if payload.get("prompt_id") not in (None, prompt_id):
+            return
+        value, max_val = payload.get("value", 0), max(payload.get("max", 1), 1)
+        progress_callback(int(value / max_val * 100), f"Step {value}/{max_val}")
+
+    ws = websocket.WebSocketApp(f"{COMFY_WS_URL}?clientId={client_id}", on_message=on_message)
+    threading.Thread(target=ws.run_forever, daemon=True).start()
+    return ws
+
+
 def wait_for_completion(
     prompt_id: str,
     client_id: str,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    timeout_seconds: int = 600
+    timeout_seconds: int = 600,
+    poll_interval: float = 0.5,
 ) -> list[bytes]:
+    """Wait for a queued prompt and return its generated images as bytes.
+
+    Completion is detected by polling ``/history/<prompt_id>``, which works even
+    if the job finished before any websocket connected.  Raises ``RuntimeError``
+    with ComfyUI's own message if the workflow fails and ``TimeoutError`` if it
+    does not finish in ``timeout_seconds``.
     """
-    Listen to the ComfyUI WebSocket for progress updates.
-    Returns a list of generated image bytes when complete.
-    """
-    images = []
-    done_event = threading.Event()
-    start_time = time.time()
-
-    def on_message(ws, message):
-        nonlocal images
-        if isinstance(message, bytes):
-            return  # Skip binary preview frames
-
-        data = json.loads(message)
-        msg_type = data.get("type", "")
-
-        if msg_type == "progress" and progress_callback:
-            value = data["data"].get("value", 0)
-            max_val = data["data"].get("max", 1)
-            pct = int((value / max_val) * 100)
-            node = data["data"].get("node", "")
-            progress_callback(pct, f"Step {value}/{max_val} (node {node})")
-
-        elif msg_type == "executing":
-            if data["data"].get("prompt_id") == prompt_id and data["data"].get("node") is None:
-                # Generation complete — fetch images
-                history = get_history(prompt_id)
-                outputs = history.get(prompt_id, {}).get("outputs", {})
-                for node_id, node_output in outputs.items():
-                    for img in node_output.get("images", []):
-                        img_data = get_image(img["filename"], img.get("subfolder", ""), img["type"])
-                        images.append(img_data)
-                done_event.set()
+    ws = _start_progress_listener(client_id, prompt_id, progress_callback)
+    deadline = time.time() + timeout_seconds
+    try:
+        while time.time() < deadline:
+            entry = get_history(prompt_id).get(prompt_id)
+            if entry:
+                status = entry.get("status", {})
+                if status.get("status_str") == "error":
+                    raise RuntimeError(_extract_error(status))
+                outputs = entry.get("outputs", {})
+                if outputs or status.get("completed"):
+                    images = []
+                    for node_output in outputs.values():
+                        for img in node_output.get("images", []):
+                            images.append(get_image(img["filename"], img.get("subfolder", ""), img["type"]))
+                    return images
+            time.sleep(poll_interval)
+        raise TimeoutError(f"ComfyUI did not finish prompt {prompt_id} within {timeout_seconds}s.")
+    finally:
+        if ws is not None:
+            try:
                 ws.close()
-
-        elif msg_type == "error":
-            done_event.set()
-            ws.close()
-
-    def on_error(ws, error):
-        done_event.set()
-
-    def on_open(ws):
-        pass
-
-    ws = websocket.WebSocketApp(
-        f"{COMFY_WS_URL}?clientId={client_id}",
-        on_message=on_message,
-        on_error=on_error,
-        on_open=on_open,
-    )
-    thread = threading.Thread(target=ws.run_forever, daemon=True)
-    thread.start()
-
-    # Poll until done or timeout
-    while not done_event.is_set():
-        if time.time() - start_time > timeout_seconds:
-            ws.close()
-            break
-        time.sleep(0.5)
-
-    return images
-
+            except Exception:
+                pass

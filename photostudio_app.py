@@ -2,23 +2,23 @@
 
 Reference photos are never sent to a cloud service: they are retained under
 ``Reference/`` and copied to the local ComfyUI input folder only for a job.
+All generation logic lives in ``shoot_runner.py``; this file draws the UI.
 """
 
 from __future__ import annotations
 
-import json
-import re
+import hashlib
 import sys
 import uuid
-from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 import comfy_bridge
-from pose_director import CONCEPT_TEMPLATES, NEGATIVE_PROMPT, PoseConfig, generate_all_pose_prompts, get_available_vibes
-from workflow_builder import build_faceid_workflow
+from pose_director import CONCEPT_TEMPLATES, PoseConfig, get_available_vibes
+from shoot_runner import ASPECTS, HIRES_SCALE, SDXL_NATIVE, reroll_tile, run_series, slug
+from workflow_builder import upscaled_size
 
 WORKSPACE = Path(__file__).parent
 OUTPUT_DIR = WORKSPACE / "OUTPUT"
@@ -31,31 +31,44 @@ PRESETS = {
     "Balanced": {"steps": 22, "preview": 768, "note": "Recommended for 1024px-class full photos."},
     "Turbo": {"steps": 28, "preview": 1024, "note": "Uses most of the GPU; reserve it for focused generation."},
 }
-ASPECTS = {"Portrait 3:4": (3, 4), "Landscape 4:3": (4, 3)}
-
-
-def slug(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_") or "photoshoot"
-
-
-def dimensions(aspect: str, short_edge: int) -> tuple[int, int]:
-    if ASPECTS[aspect] == (3, 4):
-        return short_edge, short_edge * 4 // 3
-    return short_edge * 4 // 3, short_edge
 
 
 def init_state() -> None:
     for key, value in {
-        "client_id": str(uuid.uuid4()), "tiles": [None] * 9,
-        "tile_prompts": [None] * 9, "is_generating": False, "last_output": None,
+        "client_id": str(uuid.uuid4()), "tiles": [None] * 9, "preview": None,
+        "last_output": None, "messages": [],
     }.items():
         st.session_state.setdefault(key, value)
 
 
+def notify(level: str, text: str) -> None:
+    """Remember a message so it survives the rerun that follows every job."""
+    st.session_state.messages.append((level, text))
+
+
 def save_uploads(uploaded_files) -> None:
+    """Store uploads in Reference/ without ever replacing a different photo.
+
+    Identical content is skipped; a different photo with the same name gets a
+    short content hash appended.
+    """
     for item in uploaded_files or []:
+        data = item.getvalue()
         extension = Path(item.name).suffix.lower() or ".jpg"
-        (REFERENCE_DIR / f"{slug(Path(item.name).stem)}{extension}").write_bytes(item.getvalue())
+        base = slug(Path(item.name).stem, default="reference")
+        target = REFERENCE_DIR / f"{base}{extension}"
+        if target.exists():
+            if target.read_bytes() == data:
+                continue
+            suffix = hashlib.sha1(data).hexdigest()[:8]
+            target = REFERENCE_DIR / f"{base}_{suffix}{extension}"
+            counter = 2
+            while target.exists() and target.read_bytes() != data:
+                target = REFERENCE_DIR / f"{base}_{suffix}_{counter}{extension}"
+                counter += 1
+            if target.exists():
+                continue
+        target.write_bytes(data)
 
 
 def available_references(uploaded_files) -> list[Path]:
@@ -65,60 +78,11 @@ def available_references(uploaded_files) -> list[Path]:
 
 
 def upload_reference(reference: Path) -> str:
-    result = comfy_bridge.upload_image(str(reference), subfolder="photostudio")
+    """Copy the chosen reference into ComfyUI's input folder under an ASCII name."""
+    digest = hashlib.sha1(reference.read_bytes()).hexdigest()[:12]
+    upload_name = f"ref_{digest}{reference.suffix.lower() or '.jpg'}"
+    result = comfy_bridge.upload_image(str(reference), subfolder="photostudio", upload_name=upload_name)
     return f"{result.get('subfolder', '') + '/' if result.get('subfolder') else ''}{result['name']}"
-
-
-def write_manifest(folder: Path, settings: dict, images: list[dict]) -> None:
-    payload = {"created_at": datetime.now().isoformat(timespec="seconds"), "settings": settings, "images": images}
-    (folder / "shoot_manifest.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
-def generate_images(*, concept: str, concept_prompt: str, reference_name: str, checkpoint: str,
-                    pose_config: PoseConfig, identity_strength: float, aspect: str, short_edge: int,
-                    count: int, steps: int, preview: bool, progress, status) -> list[dict]:
-    """Run one local ComfyUI job series and retain image/prompt metadata."""
-    width, height = dimensions(aspect, short_edge)
-    prompts = generate_all_pose_prompts(concept, pose_config, n_tiles=count)
-    folder = OUTPUT_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_{slug(concept)}"
-    folder.mkdir(parents=True, exist_ok=True)
-    completed: list[dict] = []
-
-    for number, (prompt, seed) in enumerate(prompts, start=1):
-        if concept_prompt:
-            prompt = prompt.replace(CONCEPT_TEMPLATES.get(concept, ""), concept_prompt)
-        status.info(f"Generating {concept}: image {number}/{count}")
-        workflow = build_faceid_workflow(
-            positive_prompt=prompt, negative_prompt=NEGATIVE_PROMPT, checkpoint_name=checkpoint,
-            reference_image=reference_name, width=width, height=height, steps=steps, seed=seed,
-            identity_strength=identity_strength, output_prefix=f"photostudio/{slug(concept)}",
-        )
-
-        def on_progress(percent: int, message: str) -> None:
-            progress.progress((number - 1 + percent / 100) / count, text=f"{concept}: {message}")
-
-        try:
-            prompt_id = comfy_bridge.queue_prompt(workflow, st.session_state.client_id)
-            images = comfy_bridge.wait_for_completion(prompt_id, st.session_state.client_id, on_progress)
-        except Exception as exc:
-            status.error(f"Image {number} failed: {exc}")
-            continue
-        if not images:
-            status.error(f"Image {number} returned no image. Check the ComfyUI console for the workflow error.")
-            continue
-        filename = f"{number:02d}_{seed}.png"
-        (folder / filename).write_bytes(images[0])
-        completed.append({"file": filename, "seed": seed, "prompt": prompt, "width": width, "height": height})
-        if preview and number <= 9:
-            st.session_state.tiles[number - 1] = images[0]
-            st.session_state.tile_prompts[number - 1] = prompt
-        st.session_state.last_output = images[0]
-
-    write_manifest(folder, {
-        "concept": concept, "reference": reference_name, "identity_strength": identity_strength,
-        "aspect": aspect, "steps": steps, "checkpoint": checkpoint, "preview": preview,
-    }, completed)
-    return completed
 
 
 st.set_page_config(page_title="Virtual AI Photostudio", page_icon="📸", layout="wide")
@@ -146,11 +110,13 @@ if missing_identity:
 left, right = st.columns([1, 1.25], gap="large")
 with left:
     st.markdown("<div class='section'>1 · Session reference photos</div>", unsafe_allow_html=True)
-    uploads = st.file_uploader("Add 1–3 clear face photos", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
+    uploads = st.file_uploader("Add reference photos", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True,
+                               help="Choose one primary likeness reference below. Other uploaded photos are saved locally but are not used in generation.")
     refs = available_references(uploads)
     if refs:
         reference = st.selectbox("Primary likeness reference", refs, format_func=lambda item: item.name)
         st.image(str(reference), width=150, caption="Retained locally in Reference/")
+        st.caption("Only the selected primary photo currently guides likeness.")
     else:
         reference = None
         st.info("Upload a clear, front-facing reference photo to enable generation.")
@@ -172,6 +138,17 @@ with left:
     st.caption(PRESETS[preset]["note"])
     checkpoint = st.selectbox("SDXL checkpoint", checkpoints, disabled=not checkpoints) if checkpoints else None
     full_count = st.number_input("Full Photoshoot images", min_value=1, max_value=50, value=8, step=1)
+    base_w, base_h = SDXL_NATIVE[aspect]
+    detail_pass = st.checkbox(
+        "Detail pass for full photos", value=True,
+        help="Renders at SDXL's native size, then enlarges and refines the image with a second pass. "
+             "Sharper and cleaner than rendering large in one go, but each image takes longer and needs more VRAM.")
+    if detail_pass:
+        out_w, out_h = upscaled_size(base_w, base_h, HIRES_SCALE)
+        st.caption(f"Full photos: {base_w}×{base_h} base, refined to {out_w}×{out_h}. "
+                   "Use Balanced or Turbo mode; Quiet mode (6 GB reserved) may be slow or run out of memory at this size.")
+    else:
+        st.caption(f"Full photos: {base_w}×{base_h} (single pass).")
 
     st.markdown("<div class='section'>4 · Generate</div>", unsafe_allow_html=True)
     ready = bool(comfy_ok and not missing_identity and checkpoint and reference)
@@ -179,48 +156,118 @@ with left:
     full_clicked = st.button("📷 Run Full Photoshoot", disabled=not ready, use_container_width=True)
     batch_clicked = st.button("🗂 Run selected Batch Concepts", disabled=not ready or not batch_concepts, use_container_width=True)
     unload_clicked = st.button("Release ComfyUI VRAM now", disabled=not comfy_ok, use_container_width=True)
+    st.caption("Leave the page alone while a job runs: changing a setting restarts the script and interrupts it.")
+    auto_unload = st.checkbox("Auto-release ComfyUI VRAM after each job", value=True,
+                              help="Frees GPU memory after every job. Turn it off for faster consecutive re-rolls.")
 
 with right:
     st.markdown("<div class='section'>Prompt-quality preview</div>", unsafe_allow_html=True)
-    progress, generation_status = st.empty(), st.empty()
+    progress, generation_status, messages_slot = st.empty(), st.empty(), st.empty()
+    if st.session_state.messages:
+        with messages_slot.container():
+            for level, text in st.session_state.messages:
+                getattr(st, level)(text)
+
+    record = st.session_state.preview
     tile_columns = st.columns(3)
+    tile_slots = []
+    reroll_index = None
     for index in range(9):
         with tile_columns[index % 3]:
+            slot = st.empty()
+            tile_slots.append(slot)
             if st.session_state.tiles[index]:
-                st.image(st.session_state.tiles[index], caption=f"Preview {index + 1}", use_container_width=True)
+                entry = record.images.get(index) if record else None
+                caption = f"Preview {index + 1}" + (f" · seed {entry['seed']}" if entry else "")
+                slot.image(st.session_state.tiles[index], caption=caption, use_container_width=True)
+                if st.button("🔄 Re-roll", key=f"reroll_{index}", disabled=not (ready and record), use_container_width=True,
+                             help="New seed and a new pose for this image only."):
+                    reroll_index = index
     if st.session_state.last_output:
         st.download_button("Download most recent image", st.session_state.last_output, "photostudio_latest.png", "image/png", use_container_width=True)
 
-auto_unload = st.checkbox("Auto-release ComfyUI VRAM after each job", value=True)
 if unload_clicked:
     st.success("ComfyUI confirmed the model-unload request.") if comfy_bridge.unload_models() else st.warning("ComfyUI did not confirm unloading. Check its server log.")
 
+
+def start_job() -> None:
+    st.session_state.messages = []
+    messages_slot.empty()
+
+
+def finish_job() -> None:
+    if auto_unload and not comfy_bridge.unload_models():
+        notify("warning", "ComfyUI did not confirm VRAM release. Check its server log.")
+    progress.empty()
+
+
 def run_job(concepts: list[str], count: int, preview: bool) -> None:
-    st.session_state.is_generating = True
+    start_job()
     try:
         uploaded_name = upload_reference(reference)
         config = PoseConfig(vibe=vibe, chaos=chaos, custom_guidance=guidance, seed=int(seed))
-        for concept in concepts:
-            generate_images(concept=concept, concept_prompt=prompts[concept], reference_name=uploaded_name,
-                checkpoint=checkpoint, pose_config=config, identity_strength=identity_strength, aspect=aspect,
-                short_edge=PRESETS[preset]["preview"] if preview else 1152, count=count,
-                steps=PRESETS[preset]["steps"] if preview else max(PRESETS[preset]["steps"], 26),
-                preview=preview, progress=progress, status=generation_status)
-        generation_status.success("Generation complete. Files and shoot_manifest.json were retained in OUTPUT/.")
-    except Exception as exc:
-        generation_status.error(f"Could not start this job: {exc}")
-    finally:
-        if auto_unload:
-            comfy_bridge.unload_models()
-        st.session_state.is_generating = False
-        progress.empty()
 
-if preview_clicked and not st.session_state.is_generating:
-    st.session_state.tiles = [None] * 9
+        def on_image(index: int, data: bytes, entry: dict) -> None:
+            st.session_state.last_output = data
+            if preview:
+                st.session_state.tiles[index] = data
+                tile_slots[index].image(data, caption=f"Preview {index + 1} · seed {entry['seed']}", use_container_width=True)
+
+        def on_error(message: str) -> None:
+            generation_status.error(message)
+            notify("error", message)
+
+        for concept in concepts:
+            result = run_series(
+                output_dir=OUTPUT_DIR, concept=concept, concept_prompt=prompts[concept], reference_name=uploaded_name,
+                checkpoint=checkpoint, pose_config=config, identity_strength=identity_strength, aspect=aspect,
+                short_edge=PRESETS[preset]["preview"], count=count,
+                base_size=None if preview else SDXL_NATIVE[aspect],
+                hires_scale=HIRES_SCALE if (detail_pass and not preview) else 0.0,
+                steps=PRESETS[preset]["steps"] if preview else max(PRESETS[preset]["steps"], 26),
+                preview=preview, client_id=st.session_state.client_id,
+                on_status=generation_status.info,
+                on_progress=lambda frac, text: progress.progress(min(max(frac, 0.0), 1.0), text=text),
+                on_image=on_image, on_error=on_error,
+            )
+            if preview:
+                st.session_state.preview = result
+            done = len(result.images)
+            notify("success" if done == count else "warning",
+                   f"{concept}: {done}/{count} images saved to OUTPUT/{result.folder.name} (with shoot_manifest.json).")
+    except Exception as exc:
+        notify("error", f"Could not start this job: {exc}")
+    finally:
+        finish_job()
+    st.rerun()
+
+
+def run_reroll(index: int) -> None:
+    start_job()
+    try:
+        generation_status.info(f"Re-rolling preview {index + 1}…")
+        data, entry = reroll_tile(
+            st.session_state.preview, index, client_id=st.session_state.client_id,
+            on_progress=lambda pct, text: progress.progress(min(max(pct / 100, 0.0), 1.0), text=f"Re-roll {index + 1}: {text}"),
+        )
+        st.session_state.tiles[index] = data
+        st.session_state.last_output = data
+        notify("success", f"Preview {index + 1} re-rolled (seed {entry['seed']}). The previous image stays in the output folder.")
+    except Exception as exc:
+        notify("error", f"Re-roll failed: {exc}")
+    finally:
+        finish_job()
+    st.rerun()
+
+
+if preview_clicked:
+    st.session_state.tiles, st.session_state.preview = [None] * 9, None
     run_job([active_concept], 9, True)
-elif full_clicked and not st.session_state.is_generating:
+elif full_clicked:
     run_job([active_concept], int(full_count), False)
-elif batch_clicked and not st.session_state.is_generating:
+elif batch_clicked:
     run_job(batch_concepts, int(full_count), False)
+elif reroll_index is not None:
+    run_reroll(reroll_index)
 
 st.caption("Reference photos and generated files are retained locally. Each output folder contains its prompts, seeds and settings in shoot_manifest.json.")
