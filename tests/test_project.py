@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import comfy_bridge
 from pose_director import PoseConfig, generate_all_pose_prompts
-from scripts import download_models, manage_services
+from scripts import concept_settings, download_models, manage_services
 from shoot_runner import reroll_tile, run_series
 from workflow_builder import build_faceid_workflow, upscaled_size
 
@@ -47,6 +47,38 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
         self.assertTrue(all("custom concept" in prompt for prompt, _ in first))
+
+
+class ConceptSettingsTests(unittest.TestCase):
+    def test_custom_names_and_prompts_persist_outside_project_when_configured(self):
+        concepts = concept_settings.default_concepts()
+        concepts["Golden Hour Botanical"] = {
+            "name": "Greenhouse Portraits",
+            "prompt": "soft window light",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings" / "concepts.json"
+            concept_settings.save_concepts(concepts, path)
+            self.assertEqual(concept_settings.load_concepts(path), concepts)
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_duplicate_or_empty_concept_names_are_rejected(self):
+        concepts = concept_settings.default_concepts()
+        concepts["Classic Vogue Studio"]["name"] = "Golden Hour Botanical"
+        with self.assertRaisesRegex(ValueError, "unique"):
+            concept_settings.validate_concepts(concepts)
+
+        concepts = concept_settings.default_concepts()
+        concepts["Golden Hour Botanical"]["name"] = " "
+        with self.assertRaisesRegex(ValueError, "empty"):
+            concept_settings.validate_concepts(concepts)
+
+    def test_malformed_concept_file_reports_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "concepts.json"
+            path.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Could not parse"):
+                concept_settings.load_concepts(path)
 
 
 class ReadinessTests(unittest.TestCase):
@@ -129,6 +161,23 @@ class ShootPersistenceTests(unittest.TestCase):
             self.assertTrue((record.folder / manifest["images"][0]["file"]).is_file())
             self.assertFalse(list(record.folder.glob("*.tmp")))
 
+    def test_completed_image_callback_includes_saved_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            completed = []
+            with patch("shoot_runner.render_image", return_value=b"saved image"):
+                record = run_series(
+                    output_dir=Path(temp_dir), concept="Test", concept_prompt="test",
+                    reference_name="reference.png", checkpoint="model.safetensors",
+                    pose_config=PoseConfig(seed=7), identity_strength=0.8,
+                    aspect="Portrait 3:4", count=1, client_id="test",
+                    on_image=lambda index, data, entry: completed.append((index, data, entry)),
+                )
+            index, data, entry = completed[0]
+            self.assertEqual(index, 0)
+            self.assertEqual(data, b"saved image")
+            self.assertTrue(Path(entry["path"]).is_file())
+            self.assertNotIn("path", record.images[0])
+
     def test_reroll_preserves_existing_image_when_seed_filename_collides(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch("shoot_runner.render_image", return_value=b"original"):
@@ -205,6 +254,13 @@ class DownloaderTests(unittest.TestCase):
 
 
 class ServiceManagerTests(unittest.TestCase):
+    def test_tracked_services_stop_comfy_first_and_photostudio_last(self):
+        stopped = []
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(manage_services, "stop_service", side_effect=lambda name, _: stopped.append(name)):
+            manage_services.stop_tracked_services(Path(temp_dir))
+        self.assertEqual(stopped, ["comfy", "photostudio"])
+
     @unittest.skipUnless(sys.platform == "win32", "Windows service launch flags are platform-specific.")
     def test_started_services_do_not_create_console_windows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -266,6 +322,10 @@ class ServiceManagerTests(unittest.TestCase):
                 manage_services.stop_service("photostudio", pid_dir)
 
             self.assertIn("VFS_PROCESS_ID", run.call_args.kwargs["env"])
+            self.assertEqual(
+                run.call_args.kwargs["env"]["VFS_RECORD_PATH"],
+                str(manage_services._record_path(pid_dir, "photostudio")),
+            )
             self.assertIn("Stop-Process -Id $root.ProcessId", run.call_args.args[0][-1])
             self.assertFalse(manage_services._record_path(pid_dir, "photostudio").exists())
 

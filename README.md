@@ -5,8 +5,11 @@ Local ComfyUI photobooth with session-based likeness preservation. Reference pho
 ## What it does
 
 - Upload/select a local primary face reference.
+- Browse all saved reference photos as thumbnails and choose the primary reference by selecting a thumbnail.
+- Rename built-in concepts and edit their prompts; customizations persist locally across restarts.
 - Generate a fast 3x3 prompt-quality preview in 3:4 or 4:3.
 - Click any preview thumbnail to open the full-size image in a new browser tab.
+- See each successfully generated image appear in the gallery while preview, full, or batch generation is running.
 - Run a user-selected number of high-resolution individual images. Full photos render at SDXL's native size (896×1152 or 1152×896) and, with *Detail pass* on (default), are enlarged 1.5× and refined by a second sampler pass to 1344×1728 / 1728×1344.
 - Run selected concepts as a batch.
 - Re-roll any single preview image (new seed and a new pose) without redoing the other eight.
@@ -65,13 +68,17 @@ start_photostudio.bat turbo
 
 Quiet reserves 6 GB for other applications; Balanced reserves 3 GB; Turbo reserves 0.5 GB. The launcher tracks services it starts under `%LOCALAPPDATA%\VirtualFotostudio`, runs them below normal CPU priority without opening extra console windows, and logs them under `%LOCALAPPDATA%\VirtualFotostudio\logs`. The web UI listens on `127.0.0.1` only, so it is not reachable from other devices on your network. The launcher waits for ComfyUI to answer (up to 2 minutes) before opening the browser.
 
-Use **Stop Photostudio** in the web UI to stop only the Photostudio server while leaving ComfyUI running. Use `stop_photostudio.bat` to stop both services started by this launcher. Unrelated processes on ports 7860 or 8188 are left untouched.
+Use **Stop Photostudio + ComfyUI** at the top of the web UI to stop both services started by this launcher. It stops ComfyUI first and Photostudio last so the page can shut down cleanly. If ComfyUI was already running independently before Photostudio started, it is left running. `stop_photostudio.bat` provides the same safe shutdown. Unrelated processes on ports 7860 or 8188 are left untouched.
 
 ## Notes
 
 - The detail pass makes each full photo take noticeably longer and needs more VRAM than a single pass. Use Balanced or Turbo mode for it; untick *Detail pass* for faster 896×1152 images.
 - The preview is deliberately a grid of independent images, not an inaccurately labelled fixed-size collage.
 - Click a preview image to open its full-size PNG in a new browser tab.
+- Uploaded and previously saved reference photos appear in a thumbnail gallery; click **Use as primary** to change which photo guides likeness.
+- Concept names and prompt edits are stored in `%LOCALAPPDATA%\VirtualFotostudio\concepts.json`, not in the project folder or Git.
+- The **Pose freedom** help icon explains that lower values favor familiar framing, while higher values allow more varied angles and actions.
+- During full and batch photoshoots, each successful image appears in the gallery as soon as it is saved.
 - `Reference/` and `OUTPUT/` are local, Git-ignored data folders created as needed. They contain private reference photos and generated results; deleting them removes that local data.
 - `Release ComfyUI VRAM now` calls ComfyUI's `/free` endpoint. It requests model unloading; Windows or other GPU applications can still retain their own VRAM.
 - If a workflow fails (for example a missing model or no face found in the reference), the app now shows ComfyUI's own error message immediately instead of waiting for a timeout.

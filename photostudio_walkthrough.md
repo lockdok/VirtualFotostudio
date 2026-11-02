@@ -23,29 +23,29 @@ flowchart LR
 | `comfy_bridge.py` | Talks to ComfyUI: upload, queue, wait for results, readiness checks, VRAM release. |
 | `scripts/download_models.py` | Downloads and size-validates the checkpoint, FaceID files, Plus Face adapter and CLIP Vision model. |
 | `scripts/manage_services.py` | Tracks the ComfyUI and Streamlit processes started by the launcher so stop never kills an unrelated listener. |
+| `scripts/concept_settings.py` | Loads and atomically saves local concept names and prompts outside the repository. |
 | `start_photostudio.bat` / `stop_photostudio.bat` | Start or stop ComfyUI and the web UI. |
 | `download_models.bat` | One-click download of the workflow checkpoint and identity models. |
 | `Reference/`, `OUTPUT/` | Local-only reference photos and generated results (created as needed and git-ignored). |
 
 ## Start and stop
 
-`start_photostudio.bat [quiet|balanced|turbo]` starts ComfyUI if needed, waits until it answers, then opens `http://127.0.0.1:7860`. The page is reachable from this PC only. The **Stop Photostudio** button on the page stops the tracked Streamlit server and leaves ComfyUI running. `stop_photostudio.bat` stops both services started by this launcher; already-running external services are left alone. Service logs and process records are kept under `%LOCALAPPDATA%\VirtualFotostudio`.
+`start_photostudio.bat [quiet|balanced|turbo]` starts ComfyUI if needed, waits until it answers, then opens `http://127.0.0.1:7860`. The page is reachable from this PC only. **Stop Photostudio + ComfyUI** at the top of the page stops both tracked services, stopping ComfyUI before the UI. A ComfyUI instance that was already running outside this launcher remains untouched. `stop_photostudio.bat` has the same safe behavior. Service logs, process records, and customized concepts are kept under `%LOCALAPPDATA%\VirtualFotostudio`.
 
 ## Using the page
 
-1. **Reference photos** - upload reference photos and pick one primary likeness reference. All are kept in `Reference/`; a different photo with the same file name never replaces an existing one. Only the selected photo is currently used for likeness.
-2. **Concepts and direction** - each concept is an editable prompt (setting, lighting, wardrobe). The prompts never describe the person; identity comes only from the reference photo. *Vibe* chooses the mood of the poses, *Pose freedom* how much framings and actions are shuffled, *Pose guidance* adds your own keywords, and a fixed *Seed* makes a shoot repeatable (-1 = random).
+1. **Reference photos** - upload one or more photos. All saved photos appear as thumbnails; click **Use as primary** to choose which one guides likeness. A different photo with the same file name never replaces an existing one.
+2. **Concepts and direction** - expand **Rename concepts and edit their prompts** to customize each display name and its setting/lighting/wardrobe prompt. Edits are saved to `%LOCALAPPDATA%\VirtualFotostudio\concepts.json` and persist across restarts. Concept prompts do not describe the person; identity comes from the selected reference photo. *Vibe* chooses the mood of the poses, *Pose freedom* has a help icon explaining its range from familiar to varied framings/actions, *Pose guidance* adds your own keywords, and a fixed *Seed* makes a shoot repeatable (-1 = random).
 3. **Quality and likeness** - *Identity strength* trades likeness against prompt freedom. *Performance mode* sets steps and preview size. Pick an SDXL checkpoint.
 4. **Generate**
-   - **3x3 prompt preview** - nine independent images, a quick way to judge a concept.
-     Click a thumbnail to open the full-size PNG in a new browser tab.
-   - **Full Photoshoot** - the number of high-resolution images you choose. Each is rendered at SDXL's native size (896x1152 or 1152x896); with *Detail pass* ticked it is then enlarged 1.5x and refined by a second pass, giving 1344x1728 (or 1728x1344). This avoids the warped details that rendering very large in one pass causes, at the cost of time and VRAM.
-   - **Batch Concepts** - the full shoot for every ticked concept.
+   - **3x3 prompt preview** - nine independent images, a quick way to judge a concept. Each completed image appears immediately; click a thumbnail to open the full-size PNG in a new browser tab.
+   - **Full Photoshoot** - the number of high-resolution images you choose. Each appears in the gallery as soon as it is saved. Images render at SDXL's native size (896x1152 or 1152x896); with *Detail pass* ticked they are enlarged 1.5x and refined by a second pass, giving 1344x1728 (or 1728x1344). This avoids the warped details that rendering very large in one pass causes, at the cost of time and VRAM.
+   - **Batch Concepts** - the full shoot for every selected concept, with successful images added to the same live gallery as they finish.
    - **Re-roll** (below each preview image) - replaces just that image with a new seed *and* a new pose, keeping the same reference, concept and settings as the preview. It reloads models each time unless you untick *Auto-release ComfyUI VRAM*, so untick it for quick consecutive re-rolls.
 
 Leave the page alone while a job runs: changing a setting restarts the script and interrupts the job.
 
-Use **Stop Photostudio** when finished if you want to close only the browser UI server. ComfyUI remains available for other workflows; use `stop_photostudio.bat` to stop both launcher-owned services.
+Use **Stop Photostudio + ComfyUI** when finished to stop both launcher-owned services. If ComfyUI was already running independently, the stop control leaves it available.
 
 ## What is saved
 

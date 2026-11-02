@@ -217,7 +217,7 @@ def run_series(*, output_dir: Path, concept: str, concept_prompt: Optional[str],
         entry = {"file": filename, "seed": seed, "prompt": prompt, "width": out_w, "height": out_h}
         record.images[number - 1] = entry
         write_manifest(record)
-        on_image(number - 1, data, entry)
+        on_image(number - 1, data, {**entry, "path": str(image_path)})
 
     record.status = "completed" if not record.failures else (
         "completed_with_errors" if record.images else "failed"

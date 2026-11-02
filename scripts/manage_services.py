@@ -166,12 +166,14 @@ foreach ($item in $descendants | Sort-Object -Property Depth -Descending) {
     Stop-Process -Id $item.Process.ProcessId -Force -ErrorAction SilentlyContinue
 }
 Stop-Process -Id $root.ProcessId -Force
+Remove-Item -LiteralPath $env:VFS_RECORD_PATH -Force -ErrorAction SilentlyContinue
 """
     environment = os.environ.copy()
     environment["VFS_PROCESS_ID"] = str(record["pid"])
     environment["VFS_EXPECTED_EXECUTABLE"] = record["executable"]
     environment["VFS_PROCESS_CREATED"] = str(record["creation_time"])
     environment["VFS_MATCH_MARKERS"] = json.dumps(record["match"])
+    environment["VFS_RECORD_PATH"] = str(record_path)
     subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
         capture_output=True,
@@ -181,6 +183,14 @@ Stop-Process -Id $root.ProcessId -Force
     )
     record_path.unlink(missing_ok=True)
     print(f"Stopped {service} (PID {record['pid']}).")
+
+
+def stop_tracked_services(pid_dir: Path) -> None:
+    """Stop launcher-owned ComfyUI first and Photostudio last."""
+    try:
+        stop_service("comfy", pid_dir)
+    finally:
+        stop_service("photostudio", pid_dir)
 
 
 def main() -> None:
